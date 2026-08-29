@@ -20,9 +20,9 @@
  *    Press 5: store inputValue as Gear4, flash LED 12 (index 11) and exit Learn Mode
  *
  * Gear mapping: when all four Gear values are learned and strictly increasing, the inputValue
- * is mapped to LEDs in segments between these gear ratios so the indicator follows the learned
- * points. If the stored gears are invalid or not set, the sketch falls back to the original
- * full-range mapping (inputValue 0..5 -> LEDs 11..0).
+ * is first checked against per-anchor percentage windows (configurable). If it falls within
+ * a window around an anchor the corresponding anchor LED is selected. If no window matches
+ * the code falls back to linear interpolation across the segments between anchors.
  */
 
 // LED Pin Definitions
@@ -57,6 +57,11 @@ int learnFlashLed = -1;
 unsigned long learnFlashInterval = 400; // ms
 unsigned long learnFlashLast = 0;
 bool learnFlashState = false;
+
+// Per-anchor window percentages (0.0 .. 1.0).
+// Each value is the fraction of the nominal segment width to use as the anchor window.
+// Default 0.6 means 60% of the nominal segment centered on the anchor.
+float anchorWindowPct[5] = {0.6f, 0.6f, 0.6f, 0.6f, 0.6f};
 
 // Button state for debouncing and press detection
 int lastBtnReading = HIGH; // button pullup -> HIGH when not pressed
@@ -114,6 +119,55 @@ void setup() {
 
   Serial.println("ESP32S3 12 LED Sequencer Started (pulse-frequency mode)");
   Serial.println("Hold Learn Button to enter Learn Mode. Short presses advance steps in Learn Mode.");
+}
+
+// Helper: check if inputValue falls inside an anchor window computed from anchors and midpoints.
+// anchors[]: array of anchor input values (length m)
+// anchorsLed[]: corresponding LED index for each anchor
+// anchorCount: number of anchors
+// pct[]: per-anchor window fraction (0..1)
+// returns LED index if matched, or -1 if none matched
+int mapInputUsingAnchorWindows(float value, const float anchors[], const int anchorsLed[], int anchorCount, const float pct[]) {
+  if (anchorCount < 1) return -1;
+
+  // Build nominal boundaries as midpoints between adjacent anchors
+  // boundaries[0] = min (anchors[0] or 0.0), boundaries[n] = max (anchors[n-1] or 5.0)
+  float boundaries[6]; // max anchors expected = 5
+  int n = anchorCount;
+
+  // For safety determine min and max span
+  float minVal = anchors[0];
+  float maxVal = anchors[n-1];
+  if (minVal > 0.0f) minVal = 0.0f; // ensure start at 0
+  if (maxVal < 5.0f) maxVal = 5.0f; // ensure end at 5.0
+
+  // compute midpoints
+  boundaries[0] = minVal;
+  for (int i = 0; i < n - 1; i++) {
+    boundaries[i+1] = (anchors[i] + anchors[i+1]) / 2.0f;
+  }
+  boundaries[n] = maxVal;
+
+  // For each anchor compute its nominal segment (boundaries[i] .. boundaries[i+1])
+  for (int i = 0; i < n; i++) {
+    float segLo = boundaries[i];
+    float segHi = boundaries[i+1];
+    float segCenter = anchors[i];
+    // Nominal half-width
+    float halfNominal = (segHi - segLo) / 2.0f;
+    // Window half-width scaled by pct
+    float halfWin = halfNominal * constrain(pct[i], 0.0f, 1.0f);
+    float winLo = segCenter - halfWin;
+    float winHi = segCenter + halfWin;
+    // Clamp to nominal segment
+    if (winLo < segLo) winLo = segLo;
+    if (winHi > segHi) winHi = segHi;
+    if (value >= winLo && value <= winHi) {
+      return anchorsLed[i];
+    }
+  }
+
+  return -1;
 }
 
 void loop() {
@@ -201,32 +255,41 @@ void computeInputFromPulses() {
     // If user has stored valid gear thresholds (strictly increasing), map inputValue to LEDs using those
     bool hasGears = (gear1 > 0.0f && gear2 > gear1 && gear3 > gear2 && gear4 > gear3);
     if (hasGears) {
-      // Define LED anchors for the gear points
-      const int led0 = 0;   // start (0.0)
-      const int led1 = 4;   // Gear1 -> LED 5
-      const int led2 = 7;   // Gear2 -> LED 8
-      const int led3 = 10;  // Gear3 -> LED 11
-      const int led4 = 11;  // Gear4 -> LED 12 (top)
+      // Define anchor arrays
+      const int anchorCount = 5;
+      float anchors[anchorCount];
+      int anchorLeds[anchorCount];
+      anchors[0] = 0.0f;      anchorLeds[0] = 0;   // LED 1
+      anchors[1] = gear1;    anchorLeds[1] = 4;   // LED 5
+      anchors[2] = gear2;    anchorLeds[2] = 7;   // LED 8
+      anchors[3] = gear3;    anchorLeds[3] = 10;  // LED 11
+      anchors[4] = gear4;    anchorLeds[4] = 11;  // LED 12
 
-      if (inputValue <= gear1) {
-        // map 0..gear1 -> led0..led1
-        float frac = (gear1 > 0.0001f) ? (inputValue / gear1) : 0.0f;
-        int idx = led0 + (int)round(frac * (led1 - led0));
-        activeLed = constrain(idx, 0, NUM_LEDS - 1);
-      } else if (inputValue <= gear2) {
-        float frac = (inputValue - gear1) / (gear2 - gear1);
-        int idx = led1 + (int)round(frac * (led2 - led1));
-        activeLed = constrain(idx, 0, NUM_LEDS - 1);
-      } else if (inputValue <= gear3) {
-        float frac = (inputValue - gear2) / (gear3 - gear2);
-        int idx = led2 + (int)round(frac * (led3 - led2));
-        activeLed = constrain(idx, 0, NUM_LEDS - 1);
-      } else if (inputValue <= gear4) {
-        float frac = (inputValue - gear3) / (gear4 - gear3);
-        int idx = led3 + (int)round(frac * (led4 - led3));
-        activeLed = constrain(idx, 0, NUM_LEDS - 1);
+      // First try mapping using percentage windows around anchors
+      int idx = mapInputUsingAnchorWindows(inputValue, anchors, anchorLeds, anchorCount, anchorWindowPct);
+      if (idx >= 0) {
+        activeLed = idx;
       } else {
-        activeLed = led4;
+        // Fallback to linear interpolation between anchors (previous behavior)
+        if (inputValue <= anchors[1]) {
+          float frac = (anchors[1] > 0.0001f) ? (inputValue / anchors[1]) : 0.0f;
+          int i = anchorLeds[0] + (int)round(frac * (anchorLeds[1] - anchorLeds[0]));
+          activeLed = constrain(i, 0, NUM_LEDS - 1);
+        } else if (inputValue <= anchors[2]) {
+          float frac = (inputValue - anchors[1]) / (anchors[2] - anchors[1]);
+          int i = anchorLeds[1] + (int)round(frac * (anchorLeds[2] - anchorLeds[1]));
+          activeLed = constrain(i, 0, NUM_LEDS - 1);
+        } else if (inputValue <= anchors[3]) {
+          float frac = (inputValue - anchors[2]) / (anchors[3] - anchors[2]);
+          int i = anchorLeds[2] + (int)round(frac * (anchorLeds[3] - anchorLeds[2]));
+          activeLed = constrain(i, 0, NUM_LEDS - 1);
+        } else if (inputValue <= anchors[4]) {
+          float frac = (inputValue - anchors[3]) / (anchors[4] - anchors[3]);
+          int i = anchorLeds[3] + (int)round(frac * (anchorLeds[4] - anchorLeds[3]));
+          activeLed = constrain(i, 0, NUM_LEDS - 1);
+        } else {
+          activeLed = anchorLeds[4];
+        }
       }
     } else {
       // Fallback to original full-range mapping (5.00 -> LED 1, 0.00 -> LED 12)
