@@ -50,6 +50,12 @@ float gear4 = 0.0f;
 bool inLearnMode = false;
 int learnStep = 0; // 0 = not started, increments on each short press while in learn mode
 
+// Which LED should flash to indicate current learn step (-1 = none)
+int learnFlashLed = -1;
+unsigned long learnFlashInterval = 400; // ms
+unsigned long learnFlashLast = 0;
+bool learnFlashState = false;
+
 // Button state for debouncing and press detection
 int lastBtnReading = HIGH; // button pullup -> HIGH when not pressed
 int btnState = HIGH; // stable state
@@ -201,17 +207,31 @@ void computeInputFromPulses() {
 void updateLeds() {
   allLedsOff();
 
-  // If in Learn Mode, show a special LED pattern: blink LED 1 slowly to indicate mode (optional)
+  unsigned long now = millis();
+
+  // If in Learn Mode, show the learn-step flashing LED (persistent until next step)
   if (inLearnMode) {
-    // Blink LED1 (index 0) while in learn mode for a visual indicator
-    static unsigned long lastBlink = 0;
-    unsigned long now = millis();
-    if (now - lastBlink < 500) {
-      digitalWrite(ledPins[0], LOW); // ON
-    } else if (now - lastBlink < 1000) {
-      digitalWrite(ledPins[0], HIGH); // OFF
+    if (learnFlashLed >= 0 && learnFlashLed < NUM_LEDS) {
+      // toggle flash state based on interval
+      if (now - learnFlashLast >= learnFlashInterval) {
+        learnFlashLast = now;
+        learnFlashState = !learnFlashState;
+      }
+      if (learnFlashState) {
+        digitalWrite(ledPins[learnFlashLed], LOW); // ON (active low)
+      } else {
+        digitalWrite(ledPins[learnFlashLed], HIGH); // OFF
+      }
     } else {
-      lastBlink = now;
+      // no step selected yet; blink LED1 as a general indicator
+      static unsigned long lastBlink = 0;
+      if (now - lastBlink < 500) {
+        digitalWrite(ledPins[0], LOW); // ON
+      } else if (now - lastBlink < 1000) {
+        digitalWrite(ledPins[0], HIGH); // OFF
+      } else {
+        lastBlink = now;
+      }
     }
     return;
   }
@@ -271,9 +291,9 @@ void pollLearnButton() {
             // Long press: enter learn mode
             inLearnMode = true;
             learnStep = 0;
+            learnFlashLed = -1; // no step selected yet
             Serial.println("Entered Learn Mode. Short press to advance steps.");
-            // small visual cue
-            flashLedIndex(1, 3, 100); // flash LED 2 three times
+            // visual indicator handled in updateLeds()
           } else if (inLearnMode && pressLen < LONG_PRESS_MS) {
             // Short press while in learn mode: advance a step
             learnStep++;
@@ -292,34 +312,35 @@ void handleLearnStep(int step) {
   switch (step) {
     case 1:
       Serial.println("Learn Step 1: Flash LED 2");
-      flashLedIndex(1, 4, 100); // LED 2 (index 1)
+      learnFlashLed = 1; // LED 2 (index 1) will now flash until next step
       break;
     case 2:
       gear1 = inputValue;
       Serial.print("Learn Step 2: Stored Gear1 = "); Serial.println(gear1, 3);
-      flashLedIndex(4, 4, 100); // LED 5 (index 4)
+      learnFlashLed = 4; // LED 5 (index 4)
       break;
     case 3:
       gear2 = inputValue;
       Serial.print("Learn Step 3: Stored Gear2 = "); Serial.println(gear2, 3);
-      flashLedIndex(7, 4, 100); // LED 8 (index 7)
+      learnFlashLed = 7; // LED 8 (index 7)
       break;
     case 4:
       gear3 = inputValue;
       Serial.print("Learn Step 4: Stored Gear3 = "); Serial.println(gear3, 3);
-      flashLedIndex(10, 4, 100); // LED 11 (index 10)
+      learnFlashLed = 10; // LED 11 (index 10)
       break;
     case 5:
       gear4 = inputValue;
       Serial.print("Learn Step 5: Stored Gear4 = "); Serial.println(gear4, 3);
-      flashLedIndex(11, 4, 100); // LED 12 (index 11)
-      // Exit learn mode after storing Gear4
+      // Option: set final flash briefly then exit; we'll stop flashing when exiting
+      learnFlashLed = -1;
       inLearnMode = false;
       Serial.println("Exiting Learn Mode.");
       break;
     default:
       // If steps continue beyond 5, wrap or exit; we'll exit to be safe
       Serial.println("Learn Mode: maximum steps reached, exiting.");
+      learnFlashLed = -1;
       inLearnMode = false;
       break;
   }
