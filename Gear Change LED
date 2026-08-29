@@ -1,0 +1,184 @@
+/*
+ * ESP32S3 12 LED Sequencer (pulse-frequency inputs)
+ * Controls 12 LEDs with pulsed inputs (Revs: 0..200 pulses/s, Prop: 0..100 pulses/s) and prints measured frequencies via Serial
+ *
+ * GPIO Pin Mapping (adjustable based on your hardware):
+ * LED 1-12: GPIO 16,17,18,19,20,21,40,41,42,45,46,47
+ * Pulse inputs (use GPIOs that support interrupts):
+ *   Revs  -> REV_PIN (0..200 pulses/s) -- divide pulses by 2 to get rev Hz
+ *   Prop  -> PROP_PIN (0..100 pulses/s)  -- pulses == Hz (subtract baseline before converting)
+ *
+ * Serial output: prints raw pulse counts, computed Hz, inputValue (ratio), and active LED
+ */
+
+// LED Pin Definitions
+const int NUM_LEDS = 12;
+const int ledPins[NUM_LEDS] = {16, 17, 18, 19, 20, 21, 40, 41, 42, 45, 46, 47};
+
+// Pulse input pin definitions
+const int REV_PIN = 4;    // Revs pulse input (attach interrupt)
+const int PROP_PIN = 12;  // Prop pulse input (attach interrupt)
+
+// Runtime variables
+float inputValue = 0.0; // Range: 0.00 to 5.00 (ratio of revHz/propHz)
+int activeLed = 0;      // Which LED is currently on (0-11)
+
+// Pulse counting (updated from ISRs)
+volatile unsigned long revPulseCount = 0;
+volatile unsigned long propPulseCount = 0;
+
+// Snapshot values used for serial output and calculation
+unsigned long rawRevs = 0;
+unsigned long rawProp = 0;
+float revHz = 0.0f;
+float propHz = 0.0f;
+
+// Sampling window (ms) used to compute frequency; keep in sync with loop delay
+const unsigned long SAMPLE_MS = 1000; // 1 second window -> 1 Hz resolution
+
+// Flash state used when propHz is zero
+bool propZeroFlashState = false;
+
+void IRAM_ATTR revISR() {
+  revPulseCount++;
+}
+
+void IRAM_ATTR propISR() {
+  propPulseCount++;
+}
+
+void setup() {
+  // Initialize serial
+  Serial.begin(115200);
+  delay(500);
+
+  // Initialize all LED pins as outputs (active low - set HIGH to turn off)
+  for (int i = 0; i < NUM_LEDS; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], HIGH);  // Active low: HIGH = OFF
+  }
+
+  // Configure pulse input pins as inputs. If your signals are open/float, consider INPUT_PULLUP/INPUT_PULLDOWN.
+  pinMode(REV_PIN, INPUT);
+  pinMode(PROP_PIN, INPUT);
+
+  // Attach interrupts to count pulses on rising edge. Use IRAM_ATTR on ESP32 for ISRs.
+  attachInterrupt(digitalPinToInterrupt(REV_PIN), revISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(PROP_PIN), propISR, RISING);
+
+  Serial.println("ESP32S3 12 LED Sequencer Started (pulse-frequency mode)");
+  Serial.println("Measuring pulses and printing frequencies...");
+}
+
+void loop() {
+  // Always use pulse inputs
+  computeInputFromPulses();
+
+  // Print debug values
+  Serial.print("CountRevs: ");
+  Serial.print(rawRevs);
+  Serial.print("  CountProp: ");
+  Serial.print(rawProp);
+  Serial.print("  RevsHz: ");
+  Serial.print(revHz, 2);
+  Serial.print("  PropHz: ");
+  Serial.print(propHz, 2);
+  Serial.print("  Input: ");
+  Serial.print(inputValue, 3);
+  Serial.print("  LED: ");
+  Serial.println(activeLed + 1); // 1..12 for human reading
+
+  // If propHz is zero, toggle flash state each loop to create a blinking effect
+  if (propHz <= 0.0f) {
+    propZeroFlashState = !propZeroFlashState;
+  } else {
+    propZeroFlashState = false;
+  }
+
+  // Update LED display based on current input value
+  updateLeds();
+
+  // Wait for the next sampling window. The ISRs keep counting during this delay.
+  delay(SAMPLE_MS);
+}
+
+// Read pulse counts (atomically), compute Hz for the SAMPLE_MS window, avoid divide-by-zero, and set inputValue
+void computeInputFromPulses() {
+  // Atomically capture and clear counts collected by ISRs
+  noInterrupts();
+  unsigned long revCount = revPulseCount;
+  unsigned long propCount = propPulseCount;
+  revPulseCount = 0;
+  propPulseCount = 0;
+  interrupts();
+
+  rawRevs = revCount;
+  rawProp = propCount;
+
+  // Compute frequency in Hz based on the SAMPLE_MS sampling window
+  // revCount is pulses per SAMPLE_MS; for SAMPLE_MS==1000 this is pulses per second
+  revHz = ((float)revCount) * (1000.0f / (float)SAMPLE_MS);
+  // Revs sensor produces 0..200 pulses/s; divide by 2 to get revolutions per second (Hz)
+  revHz = revHz / 2.0f;
+
+  // Subtract 100 raw pulses from propCount before converting (as requested), then convert to Hz
+  unsigned long adjPropCount = (propCount > 100UL) ? (propCount - 100UL) : 0UL;
+  propHz = ((float)adjPropCount) * (1000.0f / (float)SAMPLE_MS);
+
+  // Constrain measured frequencies to expected ranges
+  if (revHz < 0.0f) revHz = 0.0f;
+  if (revHz > 100.0f) revHz = 100.0f; // after dividing pulses by 2, max expected is 100 Hz
+  if (propHz < 0.0f) propHz = 0.0f;
+  if (propHz > 100.0f) propHz = 100.0f;
+
+  // Avoid division by zero; if propHz is zero set inputValue to 0.0
+  if (propHz <= 0.0f) {
+    inputValue = 0.0f;
+    // activeLed left unchanged; updateLeds will handle flashing pattern when propHz==0
+  } else {
+    inputValue = revHz / propHz; // Ratio
+
+    // Constrain input to expected 0.0 - 5.0 range used by the LED mapping
+    if (inputValue < 0.0f) inputValue = 0.0f;
+    if (inputValue > 5.0f) inputValue = 5.0f;
+
+    // Map inputValue to LED index (0..11)
+    // We multiply by 100 so 5.00 -> 500 and map descending from 500..0 to 0..NUM_LEDS-1
+    activeLed = map((int)(inputValue * 100.0f), 500, 0, 0, NUM_LEDS - 1);
+    if (activeLed >= NUM_LEDS) activeLed = NUM_LEDS - 1;
+    if (activeLed < 0) activeLed = 0;
+  }
+}
+
+// Update LED display - only one LED on at a time (active low). If propHz==0, flash LEDs 2,5,8,11 and keep LED 12 off
+void updateLeds() {
+  allLedsOff();
+
+  if (propHz <= 0.0f) {
+    // Flash LEDs 2,5,8,11 (indexes 1,4,7,10) when propHz is zero
+    if (propZeroFlashState) {
+      digitalWrite(ledPins[1], LOW);
+      digitalWrite(ledPins[4], LOW);
+      digitalWrite(ledPins[7], LOW);
+      digitalWrite(ledPins[10], LOW);
+    }
+    // Ensure LED 12 (index 11) stays off - already off from allLedsOff()
+    return;
+  }
+
+  // Light up only the active LED (active low: set LOW to turn ON)
+  digitalWrite(ledPins[activeLed], LOW);
+}
+
+// Utility functions
+void allLedsOff() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    digitalWrite(ledPins[i], HIGH);  // Active low: HIGH = OFF
+  }
+}
+
+void allLedsOn() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    digitalWrite(ledPins[i], LOW);  // Active low: LOW = ON
+  }
+}
