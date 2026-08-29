@@ -9,6 +9,18 @@
  *   Prop  -> PROP_PIN (0..100 pulses/s)  -- pulses == Hz (subtract baseline before converting)
  *
  * Serial output: prints raw pulse counts, computed Hz, inputValue (ratio), and active LED
+ *
+ * New: Learn Mode using a single physical button (LEARN_BTN_PIN).
+ * - Enter Learn Mode by holding the learn button for >= 1000 ms (long press).
+ * - While in Learn Mode, short presses advance steps:
+ *    Press 1: flash LED 2 (index 1)
+ *    Press 2: store inputValue as Gear1, flash LED 5 (index 4)
+ *    Press 3: store inputValue as Gear2, flash LED 8 (index 7)
+ *    Press 4: store inputValue as Gear3, flash LED 11 (index 10)
+ *    Press 5: store inputValue as Gear4, flash LED 12 (index 11) and exit Learn Mode
+ *
+ * You can change LEARN_BTN_PIN to whichever GPIO you have available. The button uses INPUT_PULLUP
+ * and is active LOW (press connects to GND).
  */
 
 // LED Pin Definitions
@@ -19,9 +31,31 @@ const int ledPins[NUM_LEDS] = {16, 17, 18, 19, 20, 21, 40, 41, 42, 45, 46, 47};
 const int REV_PIN = 4;    // Revs pulse input (attach interrupt)
 const int PROP_PIN = 12;  // Prop pulse input (attach interrupt)
 
+// Learn button (single button, repeated presses)
+const int LEARN_BTN_PIN = 14; // default pin for learn button (change if needed)
+const unsigned long LONG_PRESS_MS = 1000; // hold duration to enter learn mode
+const unsigned long DEBOUNCE_MS = 50;
+
 // Runtime variables
 float inputValue = 0.0; // Range: 0.00 to 5.00 (ratio of revHz/propHz)
 int activeLed = 0;      // Which LED is currently on (0-11)
+
+// Gear storage
+float gear1 = 0.0f;
+float gear2 = 0.0f;
+float gear3 = 0.0f;
+float gear4 = 0.0f;
+
+// Learn mode state
+bool inLearnMode = false;
+int learnStep = 0; // 0 = not started, increments on each short press while in learn mode
+
+// Button state for debouncing and press detection
+int lastBtnReading = HIGH; // button pullup -> HIGH when not pressed
+int btnState = HIGH; // stable state
+unsigned long lastDebounceTime = 0;
+unsigned long btnPressStart = 0;
+bool btnWasPressed = false; // edge tracking
 
 // Pulse counting (updated from ISRs)
 volatile unsigned long revPulseCount = 0;
@@ -35,6 +69,7 @@ float propHz = 0.0f;
 
 // Sampling window (ms) used to compute frequency; keep in sync with loop delay
 const unsigned long SAMPLE_MS = 1000; // 1 second window -> 1 Hz resolution
+unsigned long lastSampleMillis = 0;
 
 // Flash state used when propHz is zero
 bool propZeroFlashState = false;
@@ -62,44 +97,56 @@ void setup() {
   pinMode(REV_PIN, INPUT);
   pinMode(PROP_PIN, INPUT);
 
+  // Configure learn button as input with internal pullup (active LOW)
+  pinMode(LEARN_BTN_PIN, INPUT_PULLUP);
+
   // Attach interrupts to count pulses on rising edge. Use IRAM_ATTR on ESP32 for ISRs.
   attachInterrupt(digitalPinToInterrupt(REV_PIN), revISR, RISING);
   attachInterrupt(digitalPinToInterrupt(PROP_PIN), propISR, RISING);
 
   Serial.println("ESP32S3 12 LED Sequencer Started (pulse-frequency mode)");
-  Serial.println("Measuring pulses and printing frequencies...");
+  Serial.println("Hold Learn Button to enter Learn Mode. Short presses advance steps in Learn Mode.");
 }
 
 void loop() {
-  // Always use pulse inputs
-  computeInputFromPulses();
+  // Poll button frequently so we can detect long press / short presses responsively
+  pollLearnButton();
 
-  // Print debug values
-  Serial.print("CountRevs: ");
-  Serial.print(rawRevs);
-  Serial.print("  CountProp: ");
-  Serial.print(rawProp);
-  Serial.print("  RevsHz: ");
-  Serial.print(revHz, 2);
-  Serial.print("  PropHz: ");
-  Serial.print(propHz, 2);
-  Serial.print("  Input: ");
-  Serial.print(inputValue, 3);
-  Serial.print("  LED: ");
-  Serial.println(activeLed + 1); // 1..12 for human reading
+  // Only sample and update LEDs once per SAMPLE_MS window
+  unsigned long now = millis();
+  if (now - lastSampleMillis >= SAMPLE_MS) {
+    lastSampleMillis = now;
 
-  // If propHz is zero, toggle flash state each loop to create a blinking effect
-  if (propHz <= 0.0f) {
-    propZeroFlashState = !propZeroFlashState;
-  } else {
-    propZeroFlashState = false;
+    // Read pulses and compute input
+    computeInputFromPulses();
+
+    // Print debug values
+    Serial.print("CountRevs: ");
+    Serial.print(rawRevs);
+    Serial.print("  CountProp: ");
+    Serial.print(rawProp);
+    Serial.print("  RevsHz: ");
+    Serial.print(revHz, 2);
+    Serial.print("  PropHz: ");
+    Serial.print(propHz, 2);
+    Serial.print("  Input: ");
+    Serial.print(inputValue, 3);
+    Serial.print("  LED: ");
+    Serial.println(activeLed + 1); // 1..12 for human reading
+
+    // If propHz is zero, toggle flash state each sample to create a blinking effect
+    if (propHz <= 0.0f) {
+      propZeroFlashState = !propZeroFlashState;
+    } else {
+      propZeroFlashState = false;
+    }
+
+    // Update LED display based on current input value
+    updateLeds();
   }
 
-  // Update LED display based on current input value
-  updateLeds();
-
-  // Wait for the next sampling window. The ISRs keep counting during this delay.
-  delay(SAMPLE_MS);
+  // Small delay to avoid hammering CPU while still being responsive to button presses
+  delay(10);
 }
 
 // Read pulse counts (atomically), compute Hz for the SAMPLE_MS window, avoid divide-by-zero, and set inputValue
@@ -154,6 +201,21 @@ void computeInputFromPulses() {
 void updateLeds() {
   allLedsOff();
 
+  // If in Learn Mode, show a special LED pattern: blink LED 1 slowly to indicate mode (optional)
+  if (inLearnMode) {
+    // Blink LED1 (index 0) while in learn mode for a visual indicator
+    static unsigned long lastBlink = 0;
+    unsigned long now = millis();
+    if (now - lastBlink < 500) {
+      digitalWrite(ledPins[0], LOW); // ON
+    } else if (now - lastBlink < 1000) {
+      digitalWrite(ledPins[0], HIGH); // OFF
+    } else {
+      lastBlink = now;
+    }
+    return;
+  }
+
   if (propHz <= 0.0f) {
     // Flash LEDs 2,5,8,11 (indexes 1,4,7,10) when propHz is zero
     if (propZeroFlashState) {
@@ -180,5 +242,96 @@ void allLedsOff() {
 void allLedsOn() {
   for (int i = 0; i < NUM_LEDS; i++) {
     digitalWrite(ledPins[i], LOW);  // Active low: LOW = ON
+  }
+}
+
+// Poll the single learn button, detect long press to enter Learn Mode and short presses to advance steps
+void pollLearnButton() {
+  int reading = digitalRead(LEARN_BTN_PIN);
+
+  if (reading != lastBtnReading) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_MS) {
+    // If the button state has changed
+    if (reading != btnState) {
+      btnState = reading;
+      if (btnState == LOW) {
+        // Button pressed
+        btnPressStart = millis();
+        btnWasPressed = true;
+      } else {
+        // Button released
+        if (btnWasPressed) {
+          unsigned long pressLen = millis() - btnPressStart;
+          btnWasPressed = false;
+
+          if (!inLearnMode && pressLen >= LONG_PRESS_MS) {
+            // Long press: enter learn mode
+            inLearnMode = true;
+            learnStep = 0;
+            Serial.println("Entered Learn Mode. Short press to advance steps.");
+            // small visual cue
+            flashLedIndex(1, 3, 100); // flash LED 2 three times
+          } else if (inLearnMode && pressLen < LONG_PRESS_MS) {
+            // Short press while in learn mode: advance a step
+            learnStep++;
+            handleLearnStep(learnStep);
+          }
+        }
+      }
+    }
+  }
+
+  lastBtnReading = reading;
+}
+
+// Handle actions for each learn step
+void handleLearnStep(int step) {
+  switch (step) {
+    case 1:
+      Serial.println("Learn Step 1: Flash LED 2");
+      flashLedIndex(1, 4, 100); // LED 2 (index 1)
+      break;
+    case 2:
+      gear1 = inputValue;
+      Serial.print("Learn Step 2: Stored Gear1 = "); Serial.println(gear1, 3);
+      flashLedIndex(4, 4, 100); // LED 5 (index 4)
+      break;
+    case 3:
+      gear2 = inputValue;
+      Serial.print("Learn Step 3: Stored Gear2 = "); Serial.println(gear2, 3);
+      flashLedIndex(7, 4, 100); // LED 8 (index 7)
+      break;
+    case 4:
+      gear3 = inputValue;
+      Serial.print("Learn Step 4: Stored Gear3 = "); Serial.println(gear3, 3);
+      flashLedIndex(10, 4, 100); // LED 11 (index 10)
+      break;
+    case 5:
+      gear4 = inputValue;
+      Serial.print("Learn Step 5: Stored Gear4 = "); Serial.println(gear4, 3);
+      flashLedIndex(11, 4, 100); // LED 12 (index 11)
+      // Exit learn mode after storing Gear4
+      inLearnMode = false;
+      Serial.println("Exiting Learn Mode.");
+      break;
+    default:
+      // If steps continue beyond 5, wrap or exit; we'll exit to be safe
+      Serial.println("Learn Mode: maximum steps reached, exiting.");
+      inLearnMode = false;
+      break;
+  }
+}
+
+// Flash a specific LED index 'times' times with duration ms each (non-blocking friendly but does small delays)
+void flashLedIndex(int ledIndex, int times, unsigned long msDelay) {
+  if (ledIndex < 0 || ledIndex >= NUM_LEDS) return;
+  for (int i = 0; i < times; i++) {
+    digitalWrite(ledPins[ledIndex], LOW);
+    delay(msDelay);
+    digitalWrite(ledPins[ledIndex], HIGH);
+    delay(msDelay);
   }
 }
