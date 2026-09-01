@@ -64,8 +64,8 @@ bool learnFlashState = false;
 float anchorWindowPct[5] = {0.6f, 0.6f, 0.6f, 0.6f, 0.6f};
 
 // Button state for debouncing and press detection
-int lastBtnReading = HIGH; // button pullup -> HIGH when not pressed
-int btnState = HIGH; // stable state
+int lastBtnReading = LOW; // with pulldown -> LOW when not pressed
+int btnState = LOW; // stable state (LOW idle)
 unsigned long lastDebounceTime = 0;
 unsigned long btnPressStart = 0;
 bool btnWasPressed = false; // edge tracking
@@ -110,8 +110,8 @@ void setup() {
   pinMode(REV_PIN, INPUT);
   pinMode(PROP_PIN, INPUT);
 
-  // Configure learn button as input with internal pullup (active LOW)
-  pinMode(LEARN_BTN_PIN, INPUT_PULLUP);
+  // Configure learn button as input with internal pulldown (active HIGH when pressed)
+  pinMode(LEARN_BTN_PIN, INPUT_PULLDOWN);
 
   // Attach interrupts to count pulses on rising edge. Use IRAM_ATTR on ESP32 for ISRs.
   attachInterrupt(digitalPinToInterrupt(REV_PIN), revISR, RISING);
@@ -374,8 +374,8 @@ void pollLearnButton() {
     // If the button state has changed
     if (reading != btnState) {
       btnState = reading;
-      if (btnState == LOW) {
-        // Button pressed
+      if (btnState == HIGH) {
+        // Button pressed (pulled up to 3.3V with external/internal pulldown)
         btnPressStart = millis();
         btnWasPressed = true;
       } else {
