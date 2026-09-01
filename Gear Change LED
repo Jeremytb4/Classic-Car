@@ -1,12 +1,12 @@
 /*
  * ESP32S3 12 LED Sequencer (pulse-frequency inputs)
- * Controls 12 LEDs with pulsed inputs (Revs: 0..200 pulses/s, Prop: 0..100 pulses/s) and prints measured frequencies via Serial
+ * Controls 12 LEDs with pulsed inputs (Revs: 0..200 pulses/s, Prop: 0..200 pulses/s) and prints measured frequencies via Serial
  *
  * GPIO Pin Mapping (adjustable based on your hardware):
  * LED 1-12: GPIO 16,17,18,19,20,21,40,41,42,45,46,47
  * Pulse inputs (use GPIOs that support interrupts):
  *   Revs  -> REV_PIN (0..200 pulses/s) -- divide pulses by 2 to get rev Hz
- *   Prop  -> PROP_PIN (0..100 pulses/s)  -- pulses == Hz (subtract baseline before converting)
+ *   Prop  -> PROP_PIN (0..200 pulses/s) -- divide pulses by 2 to get prop Hz (no baseline subtraction)
  *
  * Serial output: prints raw pulse counts, computed Hz, inputValue (ratio), and active LED
  *
@@ -231,9 +231,9 @@ void computeInputFromPulses() {
   // Revs sensor produces 0..200 pulses/s; divide by 2 to get revolutions per second (Hz)
   revHz = revHz / 2.0f;
 
-  // Subtract 100 raw pulses from propCount before converting (as requested), then convert to Hz
-  unsigned long adjPropCount = (propCount > 100UL) ? (propCount - 100UL) : 0UL;
-  propHz = ((float)adjPropCount) * (1000.0f / (float)SAMPLE_MS);
+  // Prop sensor now treated like revs: 0..200 pulses/s; divide by 2 to get prop Hz (no baseline subtraction)
+  propHz = ((float)propCount) * (1000.0f / (float)SAMPLE_MS);
+  propHz = propHz / 2.0f;
 
   // Constrain measured frequencies to expected ranges
   if (revHz < 0.0f) revHz = 0.0f;
