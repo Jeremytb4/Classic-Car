@@ -23,7 +23,19 @@
  * is first checked against per-anchor percentage windows (configurable). If it falls within
  * a window around an anchor the corresponding anchor LED is selected. If no window matches
  * the code falls back to linear interpolation across the segments between anchors.
+ *
+ * Non-volatile storage: Gear values are saved to EEPROM and persist across power cycles.
  */
+
+#include <EEPROM.h>
+
+// EEPROM configuration
+#define EEPROM_SIZE 512
+#define GEAR1_ADDR 0
+#define GEAR2_ADDR 4
+#define GEAR3_ADDR 8
+#define GEAR4_ADDR 12
+#define EEPROM_VALID_ADDR 16  // Flag to check if EEPROM has valid data
 
 // LED Pin Definitions
 const int NUM_LEDS = 12;
@@ -42,7 +54,7 @@ const unsigned long DEBOUNCE_MS = 50;
 float inputValue = 0.0; // Range: 0.00 to 5.00 (ratio of revHz/propHz)
 int activeLed = 0;      // Which LED is currently on (0-11)
 
-// Gear storage
+// Gear storage (will load from EEPROM on startup)
 float gear1 = 0.0f;
 float gear2 = 0.0f;
 float gear3 = 0.0f;
@@ -100,6 +112,12 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
+  // Initialize EEPROM
+  EEPROM.begin(EEPROM_SIZE);
+  
+  // Load gear values from EEPROM
+  loadGearsFromEEPROM();
+
   // Initialize all LED pins as outputs (active low - set HIGH to turn off)
   for (int i = 0; i < NUM_LEDS; i++) {
     pinMode(ledPins[i], OUTPUT);
@@ -119,6 +137,48 @@ void setup() {
 
   Serial.println("ESP32S3 12 LED Sequencer Started (pulse-frequency mode)");
   Serial.println("Hold Learn Button to enter Learn Mode. Short presses advance steps in Learn Mode.");
+}
+
+// Load gear values from EEPROM
+void loadGearsFromEEPROM() {
+  // Check if EEPROM contains valid data
+  byte validFlag = EEPROM.read(EEPROM_VALID_ADDR);
+  
+  if (validFlag == 0xFF) {  // First time or data was erased
+    Serial.println("EEPROM: No valid gear data found. Starting fresh.");
+    gear1 = 0.0f;
+    gear2 = 0.0f;
+    gear3 = 0.0f;
+    gear4 = 0.0f;
+  } else {
+    // Read gears from EEPROM
+    EEPROM.readBytes(GEAR1_ADDR, (uint8_t*)&gear1, sizeof(float));
+    EEPROM.readBytes(GEAR2_ADDR, (uint8_t*)&gear2, sizeof(float));
+    EEPROM.readBytes(GEAR3_ADDR, (uint8_t*)&gear3, sizeof(float));
+    EEPROM.readBytes(GEAR4_ADDR, (uint8_t*)&gear4, sizeof(float));
+    
+    Serial.println("EEPROM: Loaded gear values:");
+    Serial.print("  Gear1: "); Serial.println(gear1, 3);
+    Serial.print("  Gear2: "); Serial.println(gear2, 3);
+    Serial.print("  Gear3: "); Serial.println(gear3, 3);
+    Serial.print("  Gear4: "); Serial.println(gear4, 3);
+  }
+}
+
+// Save gear values to EEPROM
+void saveGearsToEEPROM() {
+  EEPROM.writeBytes(GEAR1_ADDR, (uint8_t*)&gear1, sizeof(float));
+  EEPROM.writeBytes(GEAR2_ADDR, (uint8_t*)&gear2, sizeof(float));
+  EEPROM.writeBytes(GEAR3_ADDR, (uint8_t*)&gear3, sizeof(float));
+  EEPROM.writeBytes(GEAR4_ADDR, (uint8_t*)&gear4, sizeof(float));
+  
+  // Write valid flag
+  EEPROM.write(EEPROM_VALID_ADDR, 0x00);
+  
+  // Commit changes to flash
+  EEPROM.commit();
+  
+  Serial.println("EEPROM: Gear values saved!");
 }
 
 // Helper: check if inputValue falls inside an anchor window computed from anchors and midpoints.
@@ -414,28 +474,30 @@ void handleLearnStep(int step) {
     case 2:
       gear1 = inputValue;
       Serial.print("Learn Step 2: Stored Gear1 = "); Serial.println(gear1, 3);
+      saveGearsToEEPROM();  // Save immediately
       learnFlashLed = 4; // LED 5 (index 4)
       break;
     case 3:
       gear2 = inputValue;
       Serial.print("Learn Step 3: Stored Gear2 = "); Serial.println(gear2, 3);
+      saveGearsToEEPROM();  // Save immediately
       learnFlashLed = 7; // LED 8 (index 7)
       break;
     case 4:
       gear3 = inputValue;
       Serial.print("Learn Step 4: Stored Gear3 = "); Serial.println(gear3, 3);
+      saveGearsToEEPROM();  // Save immediately
       learnFlashLed = 10; // LED 11 (index 10)
       break;
     case 5:
       gear4 = inputValue;
       Serial.print("Learn Step 5: Stored Gear4 = "); Serial.println(gear4, 3);
-      // Option: set final flash briefly then exit; we'll stop flashing when exiting
+      saveGearsToEEPROM();  // Save immediately
       learnFlashLed = -1;
       inLearnMode = false;
       Serial.println("Exiting Learn Mode.");
       break;
     default:
-      // If steps continue beyond 5, wrap or exit; we'll exit to be safe
       Serial.println("Learn Mode: maximum steps reached, exiting.");
       learnFlashLed = -1;
       inLearnMode = false;
