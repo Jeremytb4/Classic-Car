@@ -5,10 +5,10 @@
  * GPIO Pin Mapping (adjustable based on your hardware):
  * LED 1-12: GPIO 16,17,18,19,20,21,40,41,42,45,46,47
  * Pulse inputs (use GPIOs that support interrupts):
- *   Revs  -> REV_PIN (0..200 pulses/s) -- divide pulses by 2 to get rev Hz
- *   Prop  -> PROP_PIN (0..200 pulses/s) -- divide pulses by 2 to get prop Hz (no baseline subtraction)
+ *   Revs  -> REV_PIN (0..200 pulses/s) -- divide pulses by 2 to get rev Hz, then multiply by 60 for RPM
+ *   Prop  -> PROP_PIN (0..200 pulses/s) -- divide pulses by 2 to get prop Hz, then multiply by 60 for RPM (no baseline subtraction)
  *
- * Serial output: prints raw pulse counts, computed Hz, inputValue (ratio), and active LED
+ * Serial output: prints raw pulse counts, computed RPM, inputValue (ratio), and active LED
  *
  * New: Learn Mode using a single physical button (LEARN_BTN_PIN).
  * - Enter Learn Mode by holding the learn button for >= 1000 ms (long press).
@@ -51,7 +51,7 @@ const unsigned long LONG_PRESS_MS = 1000; // hold duration to enter learn mode
 const unsigned long DEBOUNCE_MS = 50;
 
 // Runtime variables
-float inputValue = 0.0; // Range: 0.00 to 5.00 (ratio of revHz/propHz)
+float inputValue = 0.0; // Range: 0.00 to 5.00 (ratio of revRPM/propRPM)
 int activeLed = 0;      // Which LED is currently on (0-11)
 
 // Gear storage (will load from EEPROM on startup)
@@ -89,14 +89,14 @@ volatile unsigned long propPulseCount = 0;
 // Snapshot values used for serial output and calculation
 unsigned long rawRevs = 0;
 unsigned long rawProp = 0;
-float revHz = 0.0f;
-float propHz = 0.0f;
+float revRPM = 0.0f;
+float propRPM = 0.0f;
 
 // Sampling window (ms) used to compute frequency; keep in sync with loop delay
 const unsigned long SAMPLE_MS = 1000; // 1 second window -> 1 Hz resolution
 unsigned long lastSampleMillis = 0;
 
-// Flash state used when propHz is zero
+// Flash state used when propRPM is zero
 bool propZeroFlashState = false;
 
 void IRAM_ATTR revISR() {
@@ -248,17 +248,17 @@ void loop() {
     Serial.print(rawRevs);
     Serial.print("  CountProp: ");
     Serial.print(rawProp);
-    Serial.print("  RevsHz: ");
-    Serial.print(revHz, 2);
-    Serial.print("  PropHz: ");
-    Serial.print(propHz, 2);
+    Serial.print("  RevsRPM: ");
+    Serial.print(revRPM, 2);
+    Serial.print("  PropRPM: ");
+    Serial.print(propRPM, 2);
     Serial.print("  Input: ");
     Serial.print(inputValue, 3);
     Serial.print("  LED: ");
     Serial.println(activeLed + 1); // 1..12 for human reading
 
-    // If propHz is zero, toggle flash state each sample to create a blinking effect
-    if (propHz <= 0.0f) {
+    // If propRPM is zero, toggle flash state each sample to create a blinking effect
+    if (propRPM <= 0.0f) {
       propZeroFlashState = !propZeroFlashState;
     } else {
       propZeroFlashState = false;
@@ -272,7 +272,7 @@ void loop() {
   delay(20);
 }
 
-// Read pulse counts (atomically), compute Hz for the SAMPLE_MS window, avoid divide-by-zero, and set inputValue
+// Read pulse counts (atomically), compute RPM for the SAMPLE_MS window, avoid divide-by-zero, and set inputValue
 void computeInputFromPulses() {
   // Atomically capture and clear counts collected by ISRs
   noInterrupts();
@@ -287,26 +287,26 @@ void computeInputFromPulses() {
 
   // Compute frequency in Hz based on the SAMPLE_MS sampling window
   // revCount is pulses per SAMPLE_MS; for SAMPLE_MS==1000 this is pulses per second
-  revHz = ((float)revCount) * (1000.0f / (float)SAMPLE_MS);
-  // Revs sensor produces 0..200 pulses/s; divide by 2 to get revolutions per second (Hz)
-  revHz = revHz / 2.0f;
+  revRPM = ((float)revCount) * (1000.0f / (float)SAMPLE_MS);
+  // Revs sensor produces 0..200 pulses/s; divide by 2 to get revolutions per second (Hz), then multiply by 60 for RPM
+  revRPM = revRPM / 2.0f * 60.0f;
 
-  // Prop sensor now treated like revs: 0..200 pulses/s; divide by 2 to get prop Hz (no baseline subtraction)
-  propHz = ((float)propCount) * (1000.0f / (float)SAMPLE_MS);
-  propHz = propHz / 2.0f;
+  // Prop sensor now treated like revs: 0..200 pulses/s; divide by 2 to get prop Hz, then multiply by 60 for RPM (no baseline subtraction)
+  propRPM = ((float)propCount) * (1000.0f / (float)SAMPLE_MS);
+  propRPM = propRPM / 2.0f * 60.0f;
 
-  // Constrain measured frequencies to expected ranges
-  if (revHz < 0.0f) revHz = 0.0f;
-  if (revHz > 100.0f) revHz = 100.0f; // after dividing pulses by 2, max expected is 100 Hz
-  if (propHz < 0.0f) propHz = 0.0f;
-  if (propHz > 100.0f) propHz = 100.0f;
+  // Constrain measured RPM to expected ranges
+  if (revRPM < 0.0f) revRPM = 0.0f;
+  if (revRPM > 6000.0f) revRPM = 6000.0f; // after dividing pulses by 2 and multiplying by 60, max expected is 6000 RPM
+  if (propRPM < 0.0f) propRPM = 0.0f;
+  if (propRPM > 6000.0f) propRPM = 6000.0f;
 
-  // Avoid division by zero; if propHz is zero set inputValue to 0.0
-  if (propHz <= 0.0f) {
+  // Avoid division by zero; if propRPM is zero set inputValue to 0.0
+  if (propRPM <= 0.0f) {
     inputValue = 0.0f;
-    // activeLed left unchanged; updateLeds will handle flashing pattern when propHz==0
+    // activeLed left unchanged; updateLeds will handle flashing pattern when propRPM==0
   } else {
-    inputValue = revHz / propHz; // Ratio
+    inputValue = revRPM / propRPM; // Ratio
 
     // Constrain input to expected 0.0 - 5.0 range used by the LED mapping
     if (inputValue < 0.0f) inputValue = 0.0f;
@@ -360,7 +360,7 @@ void computeInputFromPulses() {
   }
 }
 
-// Update LED display - only one LED on at a time (active low). If propHz==0, flash LEDs 2,5,8,11 and keep LED 12 off
+// Update LED display - only one LED on at a time (active low). If propRPM==0, flash LEDs 2,5,8,11 and keep LED 12 off
 void updateLeds() {
   allLedsOff();
 
@@ -393,8 +393,8 @@ void updateLeds() {
     return;
   }
 
-  if (propHz <= 0.0f) {
-    // Flash LEDs 2,5,8,11 (indexes 1,4,7,10) when propHz is zero
+  if (propRPM <= 0.0f) {
+    // Flash LEDs 2,5,8,11 (indexes 1,4,7,10) when propRPM is zero
     if (propZeroFlashState) {
       digitalWrite(ledPins[1], LOW);
       digitalWrite(ledPins[4], LOW);
