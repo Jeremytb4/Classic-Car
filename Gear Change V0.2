@@ -1,10 +1,12 @@
 /*
- * ESP32S3 12 LED Sequencer (pulse-frequency inputs)
- * Controls 12 LEDs with pulsed inputs (Revs: 0..200 pulses/s, Prop: 0..200 pulses/s) and prints measured frequencies via Serial
+ * ESP32S3 12 Car gear mesh indicator
+ * 12 LEDs show ratio between engine revs and propshaft revs.  LED's 2, 5, 8 and 11 show 'in gear' for 1st, 2nd, 3rd and 4th gears.  Inbetween LED's show if revs are too high or too low to 'Mesh' when not in gear.
  *
  * GPIO Pin Mapping (adjustable based on your hardware):
  * LED 1-12: GPIO 16,17,18,19,20,21,40,41,42,45,46,47
  * Pulse inputs (use GPIOs that support interrupts):
+ * Pin 4 Revs, Pin 12 Prop
+ * Learn Button Pin 14
  *   Revs  -> REV_PIN (0..200 pulses/s) -- divide pulses by 2 to get rev Hz, then multiply by 60 for RPM
  *   Prop  -> PROP_PIN (0..200 pulses/s) -- divide pulses by 2 to get prop Hz, then multiply by 60 for RPM (no baseline subtraction)
  *
