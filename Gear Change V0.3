@@ -1,6 +1,6 @@
 /*
  * ESP32S3 12 Car gear mesh indicator
- * 12 LEDs show ratio between engine revs and propshaft revs.  LED's 2, 5, 8 and 11 show 'in gear' for 1st, 2nd, 3rd and 4th gears.  Inbetween LED's show if revs are too high or too low to 'Mesh' when not in gear.
+ * 12 LEDs show ratio between engine revs and propshaft revs.  LED's 2, 5, 8 and 11 show 'in gear' for 1st, 2nd, 3rd and 4th gears.  Inbetween LED's show if revs are too high or too low to 'Mesh' when[...]
  *
  * GPIO Pin Mapping (adjustable based on your hardware):
  * LED 1-12: GPIO 16,17,18,19,20,21,40,41,42,45,46,47
@@ -95,7 +95,7 @@ float revRPM = 0.0f;
 float propRPM = 0.0f;
 
 // Sampling window (ms) used to compute frequency; keep in sync with loop delay
-const unsigned long SAMPLE_MS = 1000; // 1 second window -> 1 Hz resolution
+const unsigned long SAMPLE_MS = 500; // 0.5 second window -> 2x update rate
 unsigned long lastSampleMillis = 0;
 
 // Flash state used when propRPM is zero
