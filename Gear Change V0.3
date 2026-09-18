@@ -95,7 +95,7 @@ float revRPM = 0.0f;
 float propRPM = 0.0f;
 
 // Sampling window (ms) used to compute frequency; keep in sync with loop delay
-const unsigned long SAMPLE_MS = 1000; // 1 second window -> 1 Hz resolution
+const unsigned long SAMPLE_MS = 100; // 1 second window -> 0.1 Hz resolution
 unsigned long lastSampleMillis = 0;
 
 // Flash state used when propRPM is zero
