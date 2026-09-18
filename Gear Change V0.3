@@ -1,14 +1,14 @@
 /*
  * ESP32S3 12 Car gear mesh indicator
- * 12 LEDs show ratio between engine revs and propshaft revs.  LED's 2, 5, 8 and 11 show 'in gear' for 1st, 2nd, 3rd and 4th gears.  Inbetween LED's show if revs are too high or too low to 'Mesh' when not in gear.
+ * 12 LEDs show ratio between engine revs and propshaft revs.  LED's 2, 5, 8 and 11 show 'in gear' for 1st, 2nd, 3rd and 4th gears.  Inbetween LED's show if revs are too high or too low to 'Mesh' when[...]
  *
  * GPIO Pin Mapping (adjustable based on your hardware):
  * LED 1-12: GPIO 16,17,18,19,20,21,40,41,42,45,46,47
  * Pulse inputs (use GPIOs that support interrupts):
  * Pin 4 Revs, Pin 12 Prop
  * Learn Button Pin 14
- *   Revs  -> REV_PIN (0..200 pulses/s) -- divide pulses by 2 to get rev Hz, then multiply by 60 for RPM
- *   Prop  -> PROP_PIN (0..200 pulses/s) -- divide pulses by 2 to get prop Hz, then multiply by 60 for RPM (no baseline subtraction)
+ *   Revs  -> REV_PIN (0..200 pulses/s) -- multiply pulses per second by 60 for RPM
+ *   Prop  -> PROP_PIN (0..200 pulses/s) -- multiply pulses per second by 60 for RPM (no baseline subtraction)
  *
  * Serial output: prints raw pulse counts, computed RPM, inputValue (ratio), and active LED
  *
@@ -290,18 +290,18 @@ void computeInputFromPulses() {
   // Compute frequency in Hz based on the SAMPLE_MS sampling window
   // revCount is pulses per SAMPLE_MS; for SAMPLE_MS==1000 this is pulses per second
   revRPM = ((float)revCount) * (1000.0f / (float)SAMPLE_MS);
-  // Revs sensor produces 0..200 pulses/s; divide by 2 to get revolutions per second (Hz), then multiply by 60 for RPM
-  revRPM = revRPM / 2.0f * 60.0f;
+  // Revs sensor produces 0..200 pulses/s; multiply by 60 for RPM when each pulse = one revolution
+  revRPM = revRPM * 60.0f;
 
-  // Prop sensor now treated like revs: 0..200 pulses/s; divide by 2 to get prop Hz, then multiply by 60 for RPM (no baseline subtraction)
+  // Prop sensor now treated like revs: 0..200 pulses/s; multiply by 60 for RPM (no baseline subtraction)
   propRPM = ((float)propCount) * (1000.0f / (float)SAMPLE_MS);
-  propRPM = propRPM / 2.0f * 60.0f;
+  propRPM = propRPM * 60.0f;
 
   // Constrain measured RPM to expected ranges
   if (revRPM < 0.0f) revRPM = 0.0f;
-  if (revRPM > 6000.0f) revRPM = 6000.0f; // after dividing pulses by 2 and multiplying by 60, max expected is 6000 RPM
+  if (revRPM > 12000.0f) revRPM = 12000.0f; // 200 pulses/s * 60 = 12,000 RPM
   if (propRPM < 0.0f) propRPM = 0.0f;
-  if (propRPM > 6000.0f) propRPM = 6000.0f;
+  if (propRPM > 12000.0f) propRPM = 12000.0f;
 
   // Avoid division by zero; if propRPM is zero set inputValue to 0.0
   if (propRPM <= 0.0f) {
