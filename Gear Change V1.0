@@ -1,1 +1,368 @@
+/*
+ * ESP32S3 12 Car gear mesh indicator
+ * 12 LEDs show the ratio between engine revs and propshaft revs.
+ * LED 2, 5, 8 and 11 indicate 1st, 2nd, 3rd and 4th gear.
+ */
 
+#include <EEPROM.h>
+
+#define EEPROM_SIZE 512
+#define GEAR1_ADDR 0
+#define GEAR2_ADDR 4
+#define GEAR3_ADDR 8
+#define GEAR4_ADDR 12
+#define EEPROM_VALID_ADDR 16
+
+const int NUM_LEDS = 12;
+const int ledPins[NUM_LEDS] = {16, 17, 18, 19, 20, 21, 40, 41, 42, 45, 46, 47};
+
+// Array indexes are zero-based: physical LEDs 2, 5, 8 and 11.
+const int GEAR_LED_1 = 1;
+const int GEAR_LED_2 = 4;
+const int GEAR_LED_3 = 7;
+const int GEAR_LED_4 = 10;
+
+// A stored gear value is considered a match within this percentage.
+// For example, a stored value of 2.00 matches from 1.96 to 2.04.
+const float INDICATOR_WINDOW_PCT = 0.02f;
+
+const int REV_PIN = 4;
+const int PROP_PIN = 12;
+const int LEARN_BTN_PIN = 14;
+const unsigned long LONG_PRESS_MS = 1000;
+const unsigned long DEBOUNCE_MS = 50;
+const unsigned long SAMPLE_MS = 1000;
+
+float inputValue = 0.0f;
+int activeLed = 0;
+float revDivisionFactor = 1.0f;
+float propDivisionFactor = 1.0f;
+
+float gear1 = 0.0f;
+float gear2 = 0.0f;
+float gear3 = 0.0f;
+float gear4 = 0.0f;
+
+bool inLearnMode = false;
+int learnStep = 0;
+int learnFlashLed = -1;
+unsigned long learnFlashInterval = 400;
+unsigned long learnFlashLast = 0;
+bool learnFlashState = false;
+
+int lastBtnReading = LOW;
+int btnState = LOW;
+unsigned long lastDebounceTime = 0;
+unsigned long btnPressStart = 0;
+bool btnWasPressed = false;
+
+volatile unsigned long revPulseCount = 0;
+volatile unsigned long propPulseCount = 0;
+unsigned long rawRevs = 0;
+unsigned long rawProp = 0;
+float revRPM = 0.0f;
+float propRPM = 0.0f;
+unsigned long lastSampleMillis = 0;
+bool propZeroFlashState = false;
+
+void IRAM_ATTR revISR() { revPulseCount++; }
+void IRAM_ATTR propISR() { propPulseCount++; }
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  EEPROM.begin(EEPROM_SIZE);
+  loadGearsFromEEPROM();
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], HIGH);
+  }
+
+  pinMode(REV_PIN, INPUT);
+  pinMode(PROP_PIN, INPUT);
+  pinMode(LEARN_BTN_PIN, INPUT_PULLDOWN);
+
+  attachInterrupt(digitalPinToInterrupt(REV_PIN), revISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(PROP_PIN), propISR, RISING);
+
+  Serial.println("ESP32S3 12 LED Sequencer Started (pulse-frequency mode)");
+  Serial.println("Hold Learn Button to enter Learn Mode. Short presses advance steps in Learn Mode.");
+}
+
+void loop() {
+  handleLearnMode();
+  updateMeasurements();
+  updateDisplay();
+  delay(20);
+}
+
+void handleLearnMode() {
+  pollLearnButton();
+}
+
+void updateMeasurements() {
+  unsigned long now = millis();
+  if (now - lastSampleMillis < SAMPLE_MS) return;
+
+  lastSampleMillis = now;
+  computeInputFromPulses();
+
+  Serial.print("CountRevs: ");
+  Serial.print(rawRevs);
+  Serial.print("  CountProp: ");
+  Serial.print(rawProp);
+  Serial.print("  RevsRPM: ");
+  Serial.print(revRPM, 2);
+  Serial.print("  PropRPM: ");
+  Serial.print(propRPM, 2);
+  Serial.print("  Input: ");
+  Serial.print(inputValue, 3);
+  Serial.print("  LED: ");
+  Serial.println(activeLed + 1);
+
+  propZeroFlashState = propRPM <= 0.0f ? !propZeroFlashState : false;
+}
+
+void updateDisplay() {
+  updateLeds();
+}
+
+void loadGearsFromEEPROM() {
+  byte validFlag = EEPROM.read(EEPROM_VALID_ADDR);
+  if (validFlag == 0xFF) {
+    Serial.println("EEPROM: No valid gear data found. Starting fresh.");
+    gear1 = gear2 = gear3 = gear4 = 0.0f;
+    return;
+  }
+
+  EEPROM.readBytes(GEAR1_ADDR, (uint8_t*)&gear1, sizeof(float));
+  EEPROM.readBytes(GEAR2_ADDR, (uint8_t*)&gear2, sizeof(float));
+  EEPROM.readBytes(GEAR3_ADDR, (uint8_t*)&gear3, sizeof(float));
+  EEPROM.readBytes(GEAR4_ADDR, (uint8_t*)&gear4, sizeof(float));
+
+  Serial.println("EEPROM: Loaded gear values:");
+  Serial.print("  Gear1: "); Serial.println(gear1, 3);
+  Serial.print("  Gear2: "); Serial.println(gear2, 3);
+  Serial.print("  Gear3: "); Serial.println(gear3, 3);
+  Serial.print("  Gear4: "); Serial.println(gear4, 3);
+}
+
+void saveGearsToEEPROM() {
+  EEPROM.writeBytes(GEAR1_ADDR, (uint8_t*)&gear1, sizeof(float));
+  EEPROM.writeBytes(GEAR2_ADDR, (uint8_t*)&gear2, sizeof(float));
+  EEPROM.writeBytes(GEAR3_ADDR, (uint8_t*)&gear3, sizeof(float));
+  EEPROM.writeBytes(GEAR4_ADDR, (uint8_t*)&gear4, sizeof(float));
+  EEPROM.write(EEPROM_VALID_ADDR, 0x00);
+  EEPROM.commit();
+  Serial.println("EEPROM: Gear values saved!");
+}
+
+bool valueIsWithinWindow(float value, float centre) {
+  if (centre <= 0.0f) return false;
+  float window = centre * INDICATOR_WINDOW_PCT;
+  return value >= centre - window && value <= centre + window;
+}
+
+bool haveValidGears() {
+  bool ascending = gear1 > 0.0f && gear2 > gear1 && gear3 > gear2 && gear4 > gear3;
+  bool descending = gear1 > 0.0f && gear2 < gear1 && gear3 < gear2 && gear4 < gear3;
+  return ascending || descending;
+}
+
+// Build one value for each LED. The four stored values are fixed at LEDs
+// 2, 5, 8 and 11; the LEDs between them are evenly spaced in ratio space.
+// LED 1 extends below Gear 1 and LED 12 extends above Gear 4.
+void buildLedValueMap(float ledValues[NUM_LEDS]) {
+  const float gearValues[4] = {gear1, gear2, gear3, gear4};
+  const int gearLeds[4] = {GEAR_LED_1, GEAR_LED_2, GEAR_LED_3, GEAR_LED_4};
+
+  float lowStep = (gear2 - gear1) / (float)(GEAR_LED_2 - GEAR_LED_1);
+  float highStep = (gear4 - gear3) / (float)(GEAR_LED_4 - GEAR_LED_3);
+  ledValues[0] = gear1 - lowStep;
+  ledValues[NUM_LEDS - 1] = gear4 + highStep;
+
+  for (int segment = 0; segment < 3; segment++) {
+    int firstLed = gearLeds[segment];
+    int lastLed = gearLeds[segment + 1];
+    float firstValue = gearValues[segment];
+    float lastValue = gearValues[segment + 1];
+
+    for (int led = firstLed; led <= lastLed; led++) {
+      float fraction = (float)(led - firstLed) / (float)(lastLed - firstLed);
+      ledValues[led] = firstValue + (lastValue - firstValue) * fraction;
+    }
+  }
+}
+
+// Return the LED whose value is within the configured percentage window.
+// If two windows overlap, the closest centre wins. Outside every window,
+// retain the nearest LED so the display still indicates the direction/value.
+int mapInputToLed(float value) {
+  if (!haveValidGears()) {
+    bool descending = gear2 < gear1 && gear3 < gear2 && gear4 < gear3;
+    int fallback = descending
+      ? map((int)(value * 100.0f), 400, 100, GEAR_LED_1, GEAR_LED_4)
+      : map((int)(value * 100.0f), 500, 0, 0, NUM_LEDS - 1);
+    return constrain(fallback, 0, NUM_LEDS - 1);
+  }
+
+  float ledValues[NUM_LEDS];
+  buildLedValueMap(ledValues);
+
+  int closestLed = 0;
+  float closestDistance = fabsf(value - ledValues[0]);
+
+  for (int led = 0; led < NUM_LEDS; led++) {
+    float distance = fabsf(value - ledValues[led]);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestLed = led;
+    }
+    if (valueIsWithinWindow(value, ledValues[led])) {
+      return led;
+    }
+  }
+
+  return closestLed;
+}
+
+void computeInputFromPulses() {
+  noInterrupts();
+  unsigned long revCount = revPulseCount;
+  unsigned long propCount = propPulseCount;
+  revPulseCount = 0;
+  propPulseCount = 0;
+  interrupts();
+
+  rawRevs = revCount;
+  rawProp = propCount;
+
+  float revHz = ((float)revCount) * (1000.0f / (float)SAMPLE_MS);
+  float propHz = ((float)propCount) * (1000.0f / (float)SAMPLE_MS);
+  revRPM = constrain((revHz * 60.0f) / revDivisionFactor, 0.0f, 12000.0f);
+  propRPM = constrain((propHz * 60.0f) / propDivisionFactor, 0.0f, 12000.0f);
+
+  if (propRPM <= 0.0f) {
+    inputValue = 0.0f;
+    return;
+  }
+
+  inputValue = constrain(revRPM / propRPM, 0.0f, 5.0f);
+  activeLed = mapInputToLed(inputValue);
+}
+
+void updateLeds() {
+  allLedsOff();
+  unsigned long now = millis();
+
+  if (inLearnMode) {
+    if (learnFlashLed >= 0 && learnFlashLed < NUM_LEDS) {
+      if (now - learnFlashLast >= learnFlashInterval) {
+        learnFlashLast = now;
+        learnFlashState = !learnFlashState;
+      }
+      digitalWrite(ledPins[learnFlashLed], learnFlashState ? LOW : HIGH);
+    }
+    return;
+  }
+
+  if (propRPM <= 0.0f) {
+    if (propZeroFlashState) {
+      digitalWrite(ledPins[GEAR_LED_1], LOW);
+      digitalWrite(ledPins[GEAR_LED_2], LOW);
+      digitalWrite(ledPins[GEAR_LED_3], LOW);
+      digitalWrite(ledPins[GEAR_LED_4], LOW);
+    }
+    return;
+  }
+
+  digitalWrite(ledPins[activeLed], LOW);
+}
+
+void allLedsOff() {
+  for (int i = 0; i < NUM_LEDS; i++) digitalWrite(ledPins[i], HIGH);
+}
+
+void allLedsOn() {
+  for (int i = 0; i < NUM_LEDS; i++) digitalWrite(ledPins[i], LOW);
+}
+
+void pollLearnButton() {
+  int reading = digitalRead(LEARN_BTN_PIN);
+  if (reading != lastBtnReading) lastDebounceTime = millis();
+
+  if (millis() - lastDebounceTime > DEBOUNCE_MS && reading != btnState) {
+    btnState = reading;
+    if (btnState == HIGH) {
+      btnPressStart = millis();
+      btnWasPressed = true;
+    } else if (btnWasPressed) {
+      unsigned long pressLen = millis() - btnPressStart;
+      btnWasPressed = false;
+
+      if (!inLearnMode && pressLen >= LONG_PRESS_MS) {
+        inLearnMode = true;
+        learnStep = 1;
+        learnFlashLed = GEAR_LED_1;
+        learnFlashLast = millis();
+        learnFlashState = true;
+        Serial.println("Entered Learn Mode. LED 2 active; short press to store Gear1 and advance to LED 5.");
+      } else if (inLearnMode && pressLen < LONG_PRESS_MS) {
+        handleLearnStep(++learnStep);
+      }
+    }
+  }
+  lastBtnReading = reading;
+}
+
+void handleLearnStep(int step) {
+  switch (step) {
+    case 1:
+      Serial.println("Learn Step 1: Flash LED 2");
+      learnFlashLed = GEAR_LED_1;
+      break;
+    case 2:
+      gear1 = inputValue;
+      Serial.print("Learn Step 2: Stored Gear1 = "); Serial.println(gear1, 3);
+      saveGearsToEEPROM();
+      learnFlashLed = GEAR_LED_2;
+      break;
+    case 3:
+      gear2 = inputValue;
+      Serial.print("Learn Step 3: Stored Gear2 = "); Serial.println(gear2, 3);
+      saveGearsToEEPROM();
+      learnFlashLed = GEAR_LED_3;
+      break;
+    case 4:
+      gear3 = inputValue;
+      Serial.print("Learn Step 4: Stored Gear3 = "); Serial.println(gear3, 3);
+      saveGearsToEEPROM();
+      learnFlashLed = GEAR_LED_4;
+      break;
+    case 5:
+      gear4 = inputValue;
+      Serial.print("Learn Step 5: Stored Gear4 = "); Serial.println(gear4, 3);
+      saveGearsToEEPROM();
+      learnFlashLed = -1;
+      inLearnMode = false;
+      Serial.println("Exiting Learn Mode.");
+      break;
+    default:
+      Serial.println("Learn Mode: maximum steps reached, exiting.");
+      learnFlashLed = -1;
+      inLearnMode = false;
+      break;
+  }
+}
+
+void flashLedIndex(int ledIndex, int times, unsigned long msDelay) {
+  if (ledIndex < 0 || ledIndex >= NUM_LEDS) return;
+  for (int i = 0; i < times; i++) {
+    digitalWrite(ledPins[ledIndex], LOW);
+    delay(msDelay);
+    digitalWrite(ledPins[ledIndex], HIGH);
+    delay(msDelay);
+  }
+}
