@@ -15,6 +15,14 @@
 
 const int NUM_LEDS = 12;
 const int ledPins[NUM_LEDS] = {16, 17, 18, 19, 20, 21, 40, 41, 42, 45, 46, 47};
+
+// Indicator LEDs are physically mapped 1-based on the board:
+// LED 2 = index 1, LED 5 = index 4, LED 8 = index 7, LED 11 = index 10.
+const int GEAR_LED_1 = 1;
+const int GEAR_LED_2 = 4;
+const int GEAR_LED_3 = 7;
+const int GEAR_LED_4 = 10;
+
 const int REV_PIN = 4;
 const int PROP_PIN = 12;
 const int LEARN_BTN_PIN = 14;
@@ -214,7 +222,7 @@ void computeInputFromPulses() {
 
   const int anchorCount = 5;
   float anchors[anchorCount] = {0.0f, gear1, gear2, gear3, gear4};
-  int anchorLeds[anchorCount] = {0, 4, 7, 10, 11};
+  int anchorLeds[anchorCount] = {0, GEAR_LED_1, GEAR_LED_2, GEAR_LED_3, GEAR_LED_4};
   int idx = mapInputUsingAnchorWindows(inputValue, anchors, anchorLeds, anchorCount, anchorWindowPct);
 
   if (idx >= 0) {
@@ -258,10 +266,10 @@ void updateLeds() {
 
   if (propRPM <= 0.0f) {
     if (propZeroFlashState) {
-      digitalWrite(ledPins[1], LOW);
-      digitalWrite(ledPins[4], LOW);
-      digitalWrite(ledPins[7], LOW);
-      digitalWrite(ledPins[10], LOW);
+      digitalWrite(ledPins[GEAR_LED_1], LOW);
+      digitalWrite(ledPins[GEAR_LED_2], LOW);
+      digitalWrite(ledPins[GEAR_LED_3], LOW);
+      digitalWrite(ledPins[GEAR_LED_4], LOW);
     }
     return;
   }
@@ -292,9 +300,8 @@ void pollLearnButton() {
 
       if (!inLearnMode && pressLen >= LONG_PRESS_MS) {
         inLearnMode = true;
-        // Enter directly at Learn Step 1 so LED 2 is shown immediately.
         learnStep = 1;
-        learnFlashLed = 1;
+        learnFlashLed = GEAR_LED_1;
         learnFlashLast = millis();
         learnFlashState = true;
         Serial.println("Entered Learn Mode. LED 2 active; short press to store Gear1 and advance to LED 5.");
@@ -310,25 +317,25 @@ void handleLearnStep(int step) {
   switch (step) {
     case 1:
       Serial.println("Learn Step 1: Flash LED 2");
-      learnFlashLed = 1;
+      learnFlashLed = GEAR_LED_1;
       break;
     case 2:
       gear1 = inputValue;
       Serial.print("Learn Step 2: Stored Gear1 = "); Serial.println(gear1, 3);
       saveGearsToEEPROM();
-      learnFlashLed = 4;
+      learnFlashLed = GEAR_LED_2;
       break;
     case 3:
       gear2 = inputValue;
       Serial.print("Learn Step 3: Stored Gear2 = "); Serial.println(gear2, 3);
       saveGearsToEEPROM();
-      learnFlashLed = 7;
+      learnFlashLed = GEAR_LED_3;
       break;
     case 4:
       gear3 = inputValue;
       Serial.print("Learn Step 4: Stored Gear3 = "); Serial.println(gear3, 3);
       saveGearsToEEPROM();
-      learnFlashLed = 10;
+      learnFlashLed = GEAR_LED_4;
       break;
     case 5:
       gear4 = inputValue;
