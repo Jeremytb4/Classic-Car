@@ -292,9 +292,12 @@ void pollLearnButton() {
 
       if (!inLearnMode && pressLen >= LONG_PRESS_MS) {
         inLearnMode = true;
-        learnStep = 0;
-        learnFlashLed = -1;
-        Serial.println("Entered Learn Mode. Short press to advance steps.");
+        // Enter directly at Learn Step 1 so LED 2 is shown immediately.
+        learnStep = 1;
+        learnFlashLed = 1;
+        learnFlashLast = millis();
+        learnFlashState = true;
+        Serial.println("Entered Learn Mode. LED 2 active; short press to store Gear1 and advance to LED 5.");
       } else if (inLearnMode && pressLen < LONG_PRESS_MS) {
         handleLearnStep(++learnStep);
       }
