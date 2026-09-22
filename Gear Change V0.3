@@ -166,7 +166,9 @@ bool valueIsWithinWindow(float value, float centre) {
 }
 
 bool haveValidGears() {
-  return gear1 > 0.0f && gear2 > gear1 && gear3 > gear2 && gear4 > gear3;
+  bool ascending = gear1 > 0.0f && gear2 > gear1 && gear3 > gear2 && gear4 > gear3;
+  bool descending = gear1 > 0.0f && gear2 < gear1 && gear3 < gear2 && gear4 < gear3;
+  return ascending || descending;
 }
 
 // Build one value for each LED. The four stored values are fixed at LEDs
@@ -199,7 +201,10 @@ void buildLedValueMap(float ledValues[NUM_LEDS]) {
 // retain the nearest LED so the display still indicates the direction/value.
 int mapInputToLed(float value) {
   if (!haveValidGears()) {
-    int fallback = map((int)(value * 100.0f), 500, 0, 0, NUM_LEDS - 1);
+    bool descending = gear2 < gear1 && gear3 < gear2 && gear4 < gear3;
+    int fallback = descending
+      ? map((int)(value * 100.0f), 400, 100, GEAR_LED_1, GEAR_LED_4)
+      : map((int)(value * 100.0f), 500, 0, 0, NUM_LEDS - 1);
     return constrain(fallback, 0, NUM_LEDS - 1);
   }
 
