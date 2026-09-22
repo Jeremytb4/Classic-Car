@@ -16,12 +16,15 @@
 const int NUM_LEDS = 12;
 const int ledPins[NUM_LEDS] = {16, 17, 18, 19, 20, 21, 40, 41, 42, 45, 46, 47};
 
-// Indicator LEDs are physically mapped 1-based on the board:
-// LED 2 = index 1, LED 5 = index 4, LED 8 = index 7, LED 11 = index 10.
+// Array indexes are zero-based: physical LEDs 2, 5, 8 and 11.
 const int GEAR_LED_1 = 1;
 const int GEAR_LED_2 = 4;
 const int GEAR_LED_3 = 7;
 const int GEAR_LED_4 = 10;
+
+// A stored gear value is considered a match within this percentage.
+// For example, a stored value of 2.00 matches from 1.96 to 2.04.
+const float INDICATOR_WINDOW_PCT = 0.02f;
 
 const int REV_PIN = 4;
 const int PROP_PIN = 12;
@@ -46,7 +49,6 @@ int learnFlashLed = -1;
 unsigned long learnFlashInterval = 400;
 unsigned long learnFlashLast = 0;
 bool learnFlashState = false;
-float anchorWindowPct[5] = {0.6f, 0.6f, 0.6f, 0.6f, 0.6f};
 
 int lastBtnReading = LOW;
 int btnState = LOW;
@@ -96,12 +98,10 @@ void loop() {
   delay(20);
 }
 
-// Function 1: handle the learn button and learn-mode state.
 void handleLearnMode() {
   pollLearnButton();
 }
 
-// Function 2: sample pulses, calculate RPM/ratio, and report measurements.
 void updateMeasurements() {
   unsigned long now = millis();
   if (now - lastSampleMillis < SAMPLE_MS) return;
@@ -122,14 +122,9 @@ void updateMeasurements() {
   Serial.print("  LED: ");
   Serial.println(activeLed + 1);
 
-  if (propRPM <= 0.0f) {
-    propZeroFlashState = !propZeroFlashState;
-  } else {
-    propZeroFlashState = false;
-  }
+  propZeroFlashState = propRPM <= 0.0f ? !propZeroFlashState : false;
 }
 
-// Function 3: update the LEDs, including learn-mode and zero-propshaft flashing.
 void updateDisplay() {
   updateLeds();
 }
@@ -164,30 +159,68 @@ void saveGearsToEEPROM() {
   Serial.println("EEPROM: Gear values saved!");
 }
 
-int mapInputUsingAnchorWindows(float value, const float anchors[], const int anchorsLed[], int anchorCount, const float pct[]) {
-  if (anchorCount < 1) return -1;
+bool valueIsWithinWindow(float value, float centre) {
+  if (centre <= 0.0f) return false;
+  float window = centre * INDICATOR_WINDOW_PCT;
+  return value >= centre - window && value <= centre + window;
+}
 
-  float boundaries[6];
-  float minVal = anchors[0];
-  float maxVal = anchors[anchorCount - 1];
-  if (minVal > 0.0f) minVal = 0.0f;
-  if (maxVal < 5.0f) maxVal = 5.0f;
+bool haveValidGears() {
+  return gear1 > 0.0f && gear2 > gear1 && gear3 > gear2 && gear4 > gear3;
+}
 
-  boundaries[0] = minVal;
-  for (int i = 0; i < anchorCount - 1; i++) {
-    boundaries[i + 1] = (anchors[i] + anchors[i + 1]) / 2.0f;
+// Build one value for each LED. The four stored values are fixed at LEDs
+// 2, 5, 8 and 11; the LEDs between them are evenly spaced in ratio space.
+// LED 1 extends below Gear 1 and LED 12 extends above Gear 4.
+void buildLedValueMap(float ledValues[NUM_LEDS]) {
+  const float gearValues[4] = {gear1, gear2, gear3, gear4};
+  const int gearLeds[4] = {GEAR_LED_1, GEAR_LED_2, GEAR_LED_3, GEAR_LED_4};
+
+  float lowStep = (gear2 - gear1) / (float)(GEAR_LED_2 - GEAR_LED_1);
+  float highStep = (gear4 - gear3) / (float)(GEAR_LED_4 - GEAR_LED_3);
+  ledValues[0] = gear1 - lowStep;
+  ledValues[NUM_LEDS - 1] = gear4 + highStep;
+
+  for (int segment = 0; segment < 3; segment++) {
+    int firstLed = gearLeds[segment];
+    int lastLed = gearLeds[segment + 1];
+    float firstValue = gearValues[segment];
+    float lastValue = gearValues[segment + 1];
+
+    for (int led = firstLed; led <= lastLed; led++) {
+      float fraction = (float)(led - firstLed) / (float)(lastLed - firstLed);
+      ledValues[led] = firstValue + (lastValue - firstValue) * fraction;
+    }
   }
-  boundaries[anchorCount] = maxVal;
+}
 
-  for (int i = 0; i < anchorCount; i++) {
-    float segLo = boundaries[i];
-    float segHi = boundaries[i + 1];
-    float halfWin = ((segHi - segLo) / 2.0f) * constrain(pct[i], 0.0f, 1.0f);
-    float winLo = max(segLo, anchors[i] - halfWin);
-    float winHi = min(segHi, anchors[i] + halfWin);
-    if (value >= winLo && value <= winHi) return anchorsLed[i];
+// Return the LED whose value is within the configured percentage window.
+// If two windows overlap, the closest centre wins. Outside every window,
+// retain the nearest LED so the display still indicates the direction/value.
+int mapInputToLed(float value) {
+  if (!haveValidGears()) {
+    int fallback = map((int)(value * 100.0f), 500, 0, 0, NUM_LEDS - 1);
+    return constrain(fallback, 0, NUM_LEDS - 1);
   }
-  return -1;
+
+  float ledValues[NUM_LEDS];
+  buildLedValueMap(ledValues);
+
+  int closestLed = 0;
+  float closestDistance = fabsf(value - ledValues[0]);
+
+  for (int led = 0; led < NUM_LEDS; led++) {
+    float distance = fabsf(value - ledValues[led]);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestLed = led;
+    }
+    if (valueIsWithinWindow(value, ledValues[led])) {
+      return led;
+    }
+  }
+
+  return closestLed;
 }
 
 void computeInputFromPulses() {
@@ -212,36 +245,7 @@ void computeInputFromPulses() {
   }
 
   inputValue = constrain(revRPM / propRPM, 0.0f, 5.0f);
-  bool hasGears = gear1 > 0.0f && gear2 > gear1 && gear3 > gear2 && gear4 > gear3;
-
-  if (!hasGears) {
-    activeLed = map((int)(inputValue * 100.0f), 500, 0, 0, NUM_LEDS - 1);
-    activeLed = constrain(activeLed, 0, NUM_LEDS - 1);
-    return;
-  }
-
-  const int anchorCount = 5;
-  float anchors[anchorCount] = {0.0f, gear1, gear2, gear3, gear4};
-  int anchorLeds[anchorCount] = {0, GEAR_LED_1, GEAR_LED_2, GEAR_LED_3, GEAR_LED_4};
-  int idx = mapInputUsingAnchorWindows(inputValue, anchors, anchorLeds, anchorCount, anchorWindowPct);
-
-  if (idx >= 0) {
-    activeLed = idx;
-  } else if (inputValue <= anchors[1]) {
-    float frac = anchors[1] > 0.0001f ? inputValue / anchors[1] : 0.0f;
-    activeLed = constrain(anchorLeds[0] + (int)round(frac * (anchorLeds[1] - anchorLeds[0])), 0, NUM_LEDS - 1);
-  } else if (inputValue <= anchors[2]) {
-    float frac = (inputValue - anchors[1]) / (anchors[2] - anchors[1]);
-    activeLed = constrain(anchorLeds[1] + (int)round(frac * (anchorLeds[2] - anchorLeds[1])), 0, NUM_LEDS - 1);
-  } else if (inputValue <= anchors[3]) {
-    float frac = (inputValue - anchors[2]) / (anchors[3] - anchors[2]);
-    activeLed = constrain(anchorLeds[2] + (int)round(frac * (anchorLeds[3] - anchorLeds[2])), 0, NUM_LEDS - 1);
-  } else if (inputValue <= anchors[4]) {
-    float frac = (inputValue - anchors[3]) / (anchors[4] - anchors[3]);
-    activeLed = constrain(anchorLeds[3] + (int)round(frac * (anchorLeds[4] - anchorLeds[3])), 0, NUM_LEDS - 1);
-  } else {
-    activeLed = anchorLeds[4];
-  }
+  activeLed = mapInputToLed(inputValue);
 }
 
 void updateLeds() {
@@ -255,11 +259,6 @@ void updateLeds() {
         learnFlashState = !learnFlashState;
       }
       digitalWrite(ledPins[learnFlashLed], learnFlashState ? LOW : HIGH);
-    } else {
-      static unsigned long lastBlink = 0;
-      if (now - lastBlink < 500) digitalWrite(ledPins[0], LOW);
-      else if (now - lastBlink < 1000) digitalWrite(ledPins[0], HIGH);
-      else lastBlink = now;
     }
     return;
   }
